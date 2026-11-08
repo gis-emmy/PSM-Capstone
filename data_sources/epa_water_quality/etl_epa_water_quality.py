@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """
-EPA Water Quality Portal ETL Script
-Fetches water quality data from EPA WQP and loads into PostgreSQL
+EPA Water Quality Portal ETL Script - Stations Only
+Fetches monitoring stations from EPA WQP and loads into PostgreSQL
 """
 
 import os
 import sys
-import json
+import csv
 import logging
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict
+from io import StringIO
 import psycopg2
 from dotenv import load_dotenv
 
 # Configuration
-load_dotenv()
+load_dotenv()  # Load from .env in root directory
 
-EPA_WQP_BASE_URL = "https://www.waterqualitydata.us/webservices"
-DB_HOST = os.getenv('DB_HOST', 'localhost')
+EPA_WQP_BASE_URL = "https://waterqualitydata.us/data"
+DB_HOST = os.getenv('DB_HOST')
 DB_PORT = os.getenv('DB_PORT', '5432')
 DB_NAME = os.getenv('DB_NAME', 'tdot_env')
 DB_USER = os.getenv('DB_USER', 'postgres')
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'dev-password')
+DB_PASSWORD = os.getenv('RDS_PASSWORD')  # Use RDS password from .env
 
 # Configure logging
 logging.basicConfig(
@@ -32,12 +33,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class EPAWaterQualityETL:
-    """ETL for EPA Water Quality Portal data"""
+    """ETL for EPA Water Quality Portal station data"""
     
     def __init__(self):
         self.conn = None
         self.session = requests.Session()
-        self.session.timeout = 30
+        self.session.timeout = 60
         # Set user agent for EPA
         self.session.headers.update({
             'User-Agent': 'TDOT-Environmental-Viewer/1.0'
@@ -53,9 +54,9 @@ class EPAWaterQualityETL:
                 user=DB_USER,
                 password=DB_PASSWORD
             )
-            logger.info("✓ Connected to PostgreSQL")
+            logger.info("Connected to PostgreSQL")
         except Exception as e:
-            logger.error(f"✗ Database connection failed: {e}")
+            logger.error(f"Database connection failed: {e}")
             raise
     
     def close_db(self):
@@ -63,144 +64,171 @@ class EPAWaterQualityETL:
         if self.conn:
             self.conn.close()
     
-    def get_wqp_results(self, 
-                        state: str = 'TN',
-                        days_back: int = 30,
-                        limit: int = 1000) -> List[Dict]:
-        """Fetch water quality results from EPA WQP"""
+    def get_wqp_stations(self, state: str = 'US:47', limit: int = None) -> List[Dict]:
+        """Fetch monitoring stations from EPA WQP"""
         try:
-            logger.info(f"Fetching EPA WQP data for {state} (last {days_back} days)...")
-            
-            end_date = datetime.now()
-            start_date = end_date - timedelta(days=days_back)
+            logger.info(f"Fetching EPA WQP monitoring stations for {state}...")
             
             params = {
                 'statecode': state,
-                'startDateLo': start_date.strftime('%m-%d-%Y'),
-                'startDateHi': end_date.strftime('%m-%d-%Y'),
-                'mimeType': 'json',
+                'mimeType': 'csv',
                 'zip': 'no'
             }
             
             response = self.session.get(
-                f"{EPA_WQP_BASE_URL}/Result/search",
-                params=params
+                f"{EPA_WQP_BASE_URL}/Station/search",
+                params=params,
+                timeout=60
             )
             response.raise_for_status()
             
-            data = response.json()
-            results = data.get('Results', [])
-            logger.info(f"Retrieved {len(results)} water quality results")
+            # Parse CSV response
+            csv_reader = csv.DictReader(StringIO(response.text))
+            stations = []
+            for row in csv_reader:
+                stations.append(row)
+                if limit and len(stations) >= limit:
+                    break
             
-            return results[:limit]
+            logger.info(f"Retrieved {len(stations)} monitoring stations")
+            return stations
             
         except Exception as e:
-            logger.error(f"Error fetching WQP data: {e}")
+            logger.error(f"Error fetching WQP stations: {e}")
             return []
     
-    def transform_observation(self, result: Dict) -> Dict:
-        """Transform EPA WQP result to our schema"""
+    def transform_station(self, station: Dict) -> Dict:
+        """Transform EPA WQP Station CSV row to our schema"""
         try:
+            # Extract coordinates - handle cases where they might be missing
+            try:
+                lat = float(station.get('LatitudeMeasure', 0)) if station.get('LatitudeMeasure') else None
+                lon = float(station.get('LongitudeMeasure', 0)) if station.get('LongitudeMeasure') else None
+            except (ValueError, TypeError):
+                lat = None
+                lon = None
+            
             return {
-                'latitude': float(result.get('LatitudeMeasure', 0)),
-                'longitude': float(result.get('LongitudeMeasure', 0)),
-                'characteristic_name': result.get('CharacteristicName', 'Unknown'),
-                'result_value': result.get('ResultMeasureValue'),
-                'result_unit': result.get('ResultMeasure', {}).get('MeasureUnitCode', ''),
-                'sample_date': result.get('ActivityStartDate', datetime.now().strftime('%Y-%m-%d')),
-                'organization_name': result.get('OrganizationFormalName', 'Unknown'),
-                'provider': result.get('ProviderName', 'EPA WQP'),
-                'site_identifier': result.get('MonitoringLocationIdentifier', ''),
-                'sample_type': result.get('ActivityTypeCode', 'Field Msr/Obs')
+                'monitoring_location_identifier': station.get('MonitoringLocationIdentifier', ''),
+                'monitoring_location_name': station.get('MonitoringLocationName', ''),
+                'organization_identifier': station.get('OrganizationIdentifier', ''),
+                'organization_name': station.get('OrganizationFormalName', ''),
+                'latitude': lat,
+                'longitude': lon,
+                'monitoring_location_type': station.get('MonitoringLocationType', ''),
+                'huc_code': station.get('HUCEightDigitCode', ''),
+                'provider_name': station.get('ProviderName', 'EPA WQP'),
             }
         except Exception as e:
-            logger.warning(f"Error transforming observation: {e}")
+            logger.warning(f"Error transforming station: {e}")
             return None
     
-    def insert_environmental_data(self, observation: Dict) -> bool:
-        """Insert water quality observation into Environmental_Data table"""
+    def insert_station(self, station: Dict) -> bool:
+        """Insert station into water_quality_stations table"""
         try:
-            if not observation:
+            if not station:
+                return False
+            
+            # Skip if no coordinates
+            if not station.get('latitude') or not station.get('longitude'):
+                logger.debug(f"Skipping station {station.get('monitoring_location_identifier')} - no coordinates")
                 return False
             
             cursor = self.conn.cursor()
             
-            # Validate coordinates
-            lat = observation['latitude']
-            lon = observation['longitude']
-            if lat < -90 or lat > 90 or lon < -180 or lon > 180:
-                logger.warning(f"Invalid coordinates: {lat}, {lon}")
-                cursor.close()
-                return False
-            
-            # Try to convert result_value to float
-            try:
-                value = float(observation['result_value']) if observation['result_value'] else None
-            except (ValueError, TypeError):
-                value = None
-            
             sql = """
-            INSERT INTO Environmental_Data (
-                data_category, data_type, data_source, location,
-                measurement_value, measurement_unit, measurement_date,
-                data_confidence, last_verified
+            INSERT INTO water_quality_stations (
+                monitoring_location_identifier,
+                monitoring_location_name,
+                organization_identifier,
+                organization_name,
+                latitude,
+                longitude,
+                monitoring_location_type,
+                huc_code,
+                provider_name,
+                last_updated,
+                created_at,
+                updated_at
             ) VALUES (
-                %s, %s, %s, ST_GeomFromText(%s, 4326),
-                %s, %s, %s,
-                'high', CURRENT_DATE
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP,
+                CURRENT_TIMESTAMP
             )
-            ON CONFLICT DO NOTHING
+            ON CONFLICT (monitoring_location_identifier) 
+            DO UPDATE SET
+                monitoring_location_name = EXCLUDED.monitoring_location_name,
+                latitude = EXCLUDED.latitude,
+                longitude = EXCLUDED.longitude,
+                monitoring_location_type = EXCLUDED.monitoring_location_type,
+                huc_code = EXCLUDED.huc_code,
+                provider_name = EXCLUDED.provider_name,
+                updated_at = CURRENT_TIMESTAMP
             """
             
-            point_wkt = f'POINT({lon} {lat})'
-            
             cursor.execute(sql, (
-                'water_quality',
-                'measurement',
-                f"EPA WQP ({observation['provider']})",
-                point_wkt,
-                value,
-                observation['result_unit'],
-                observation['sample_date']
+                station['monitoring_location_identifier'],
+                station['monitoring_location_name'],
+                station['organization_identifier'],
+                station['organization_name'],
+                station['latitude'],
+                station['longitude'],
+                station['monitoring_location_type'],
+                station['huc_code'],
+                station['provider_name']
             ))
             
-            self.conn.commit()
             cursor.close()
+            # Commit after each successful insert
+            self.conn.commit()
             return True
             
         except Exception as e:
-            logger.error(f"Error inserting data: {e}")
-            self.conn.rollback()
+            logger.error(f"Error inserting station {station.get('monitoring_location_identifier', 'UNKNOWN')}: {e}")
+            # Rollback the failed transaction
+            try:
+                self.conn.rollback()
+            except:
+                pass
             return False
     
     def run(self):
-        """Execute full ETL pipeline"""
+        """Execute full ETL pipeline for stations"""
         try:
             self.connect_db()
             
-            logger.info("=" * 60)
-            logger.info("EPA Water Quality Portal ETL - Starting")
-            logger.info("=" * 60)
+            logger.info("=" * 70)
+            logger.info("EPA Water Quality Portal ETL - Stations")
+            logger.info("=" * 70)
             
-            # Get WQP results
-            results = self.get_wqp_results(state='TN', days_back=30)
-            if not results:
-                logger.warning("No results found")
+            # Get WQP stations
+            stations = self.get_wqp_stations(state='US:47')
+            if not stations:
+                logger.warning("No stations found")
                 return
             
-            # Process each result
+            # Process each station
             total_inserted = 0
-            for result in results:
-                observation = self.transform_observation(result)
-                if self.insert_environmental_data(observation):
-                    total_inserted += 1
+            total_skipped = 0
             
-            logger.info("=" * 60)
-            logger.info(f"ETL Complete - Inserted {total_inserted} records")
-            logger.info("=" * 60)
+            for station in stations:
+                transformed = self.transform_station(station)
+                if self.insert_station(transformed):
+                    total_inserted += 1
+                else:
+                    total_skipped += 1
+            
+            logger.info("=" * 70)
+            logger.info(f"ETL Complete")
+            logger.info(f"  Inserted/Updated: {total_inserted} stations")
+            logger.info(f"  Skipped: {total_skipped} stations")
+            logger.info("=" * 70)
             
         except Exception as e:
             logger.error(f"ETL Failed: {e}")
+            if self.conn:
+                self.conn.rollback()
         finally:
             self.close_db()
 

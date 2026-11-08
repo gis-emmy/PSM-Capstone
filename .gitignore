@@ -159,16 +159,4 @@ progress_logs/*
 .gitkeep
 .keep
 
-# ========================================
-# ⚠️  CRITICAL - NEVER COMMIT THESE ⚠️
-# ========================================
-# - .env files with secrets
-# - AWS access keys or credentials
-# - Database passwords
-# - API keys from third parties
-# - Private SSH keys
-# - node_modules/ (rebuild with npm install)
-# - Build outputs (regenerate as needed)
-# - Coverage reports
-# - OS and IDE specific files
-# - Temporary files created during development
+*data_inspection/

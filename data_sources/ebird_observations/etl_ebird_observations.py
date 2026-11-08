@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 EBIRD_API = "https://api.ebird.org/v2"
+EBIRD_API_KEY = os.getenv('EBIRD_API_KEY', '')
 TN_REGION = "US-TN"  # Region code for Tennessee
 
 DB_HOST = os.getenv('DB_HOST', 'localhost')
@@ -58,7 +59,8 @@ class eBirdETL:
                 port=DB_PORT,
                 database=DB_NAME,
                 user=DB_USER,
-                password=DB_PASSWORD
+                password=DB_PASSWORD,
+                sslmode='require'
             )
             logger.info("✓ Connected to PostgreSQL")
         except Exception as e:
@@ -72,25 +74,27 @@ class eBirdETL:
     
     def get_recent_observations(self, 
                                region: str = TN_REGION,
-                               days_back: int = 14) -> List[Dict]:
-        """Fetch recent bird observations from eBird"""
+                               days_back: int = 30) -> List[Dict]:
+        """Fetch bird observations from eBird for the past 30 days"""
         try:
+            if not EBIRD_API_KEY:
+                logger.error("EBIRD_API_KEY not set in environment variables")
+                return []
+            
+            # Cap days_back at 30 (API limit)
+            days_back = min(days_back, 30)
+            
             logger.info(f"Fetching eBird observations for {region} (last {days_back} days)...")
             
-            params = {
-                'back': days_back,
-                'maxResults': 500,
-                'fmt': 'json'
-            }
+            # eBird API v2 requires key as query parameter
+            url = f"{EBIRD_API}/data/obs/{region}/recent?back={days_back}&key={EBIRD_API_KEY}&fmt=json"
             
-            response = self.session.get(
-                f"{EBIRD_API}/data/obs/{region}/recent",
-                params=params
-            )
+            # Use direct requests.get instead of session to avoid interference
+            response = requests.get(url, timeout=120)
             response.raise_for_status()
             
             observations = response.json()
-            logger.info(f"Retrieved {len(observations)} recent observations")
+            logger.info(f"Retrieved {len(observations)} observations from past {days_back} days")
             
             return observations
             
@@ -116,6 +120,51 @@ class eBirdETL:
             
         except Exception as e:
             logger.error(f"Error fetching hotspots: {e}")
+            return []
+    
+    def get_observations_from_map_service(self, 
+                                         min_lat: float = 35.0,
+                                         max_lat: float = 36.9,
+                                         min_lon: float = -89.8,
+                                         max_lon: float = -81.6,
+                                         months: str = None) -> List[Dict]:
+        """Fetch observations using eBird map services endpoint (higher data volume)"""
+        try:
+            logger.info(f"Fetching eBird observations via map service...")
+            logger.info(f"  Bounds: ({min_lat}, {min_lon}) to ({max_lat}, {max_lon})")
+            
+            # eBird map services endpoint - returns all observations in bounding box
+            map_service_url = "https://ebird.org/mapServices/genHsForWindow.do"
+            
+            params = {
+                'minY': min_lat,
+                'maxY': max_lat,
+                'minX': min_lon,
+                'maxX': max_lon,
+                'yr': 'all',  # All years
+                'm': 'all' if not months else months  # All months or specific months
+            }
+            
+            response = self.session.get(map_service_url, params=params, timeout=60)
+            response.raise_for_status()
+            
+            # Parse response (typically returns XML or JSON hotspot data with observations)
+            data = response.json()
+            
+            # Extract observations from response
+            observations = []
+            if isinstance(data, list):
+                observations = data
+            elif isinstance(data, dict) and 'features' in data:
+                # GeoJSON format
+                for feature in data['features']:
+                    observations.append(feature['properties'])
+            
+            logger.info(f"Retrieved {len(observations)} observations from map service")
+            return observations
+            
+        except Exception as e:
+            logger.error(f"Error fetching observations from map service: {e}")
             return []
     
     def get_species_info(self, species_code: str) -> Dict:
@@ -151,52 +200,72 @@ class eBirdETL:
             is_protected = species_code in self.protected_species
             
             return {
+                'ebird_id': obs.get('obsID'),
                 'species_code': species_code,
                 'common_name': common_name,
                 'scientific_name': scientific_name,
                 'latitude': obs.get('lat'),
                 'longitude': obs.get('lng'),
-                'observation_date': obs.get('obsDt', datetime.now().strftime('%Y-%m-%d')),
                 'location_name': obs.get('locName', 'Unknown'),
+                'observation_date': obs.get('obsDt', datetime.now().strftime('%Y-%m-%d')),
                 'observation_count': obs.get('howMany', 1),
-                'protected_status': 'threatened' if is_protected else None,
-                'ebird_id': obs.get('obsID')
+                'is_protected': is_protected,
+                'data_quality_flag': obs.get('obsValid', 'valid') if obs.get('obsValid') else 'valid',
+                'is_validated': obs.get('obsValid', True)
             }
         except Exception as e:
             logger.warning(f"Error extracting observation data: {e}")
             return None
     
-    def insert_environmental_data(self, obs_data: Dict) -> bool:
-        """Insert bird observation into Environmental_Data table"""
+    def insert_ebird_observation(self, obs_data: Dict) -> bool:
+        """Insert bird observation into ebird_observations_new table with location lookup"""
         try:
             if not obs_data or not obs_data.get('latitude') or not obs_data.get('longitude'):
                 return False
             
             cursor = self.conn.cursor()
             
-            sql = """
-            INSERT INTO Environmental_Data (
-                data_category, data_type, data_source, location,
-                species_name, protected_status, measurement_date,
-                data_confidence, last_verified
-            ) VALUES (
-                %s, %s, %s, ST_GeomFromText(%s, 4326),
-                %s, %s, %s,
-                'high', CURRENT_DATE
-            )
-            ON CONFLICT DO NOTHING
+            # First, get or create location
+            location_sql = """
+            INSERT INTO ebird_locations (location_name, latitude, longitude)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (latitude, longitude) DO UPDATE
+            SET updated_at = CURRENT_TIMESTAMP
+            RETURNING location_id
             """
             
-            point_wkt = f"POINT({obs_data['longitude']} {obs_data['latitude']})"
+            cursor.execute(location_sql, (
+                obs_data['location_name'],
+                obs_data['latitude'],
+                obs_data['longitude']
+            ))
             
-            cursor.execute(sql, (
-                'bird_observation',
-                'species_observation',
-                'eBird',
-                point_wkt,
-                f"{obs_data['common_name']} ({obs_data['scientific_name']})",
-                obs_data['protected_status'],
-                obs_data['observation_date']
+            location_id = cursor.fetchone()[0]
+            
+            # Then insert observation with location_id reference
+            obs_sql = """
+            INSERT INTO ebird_observations_new (
+                location_id, ebird_id, species_code, common_name, scientific_name,
+                observation_date, observation_count, is_protected, data_quality_flag,
+                is_validated, data_source
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (ebird_id) DO NOTHING
+            """
+            
+            cursor.execute(obs_sql, (
+                location_id,
+                obs_data['ebird_id'],
+                obs_data['species_code'],
+                obs_data['common_name'],
+                obs_data['scientific_name'],
+                obs_data['observation_date'],
+                obs_data['observation_count'],
+                obs_data['is_protected'],
+                obs_data['data_quality_flag'],
+                obs_data['is_validated'],
+                'eBird'
             ))
             
             self.conn.commit()
@@ -217,21 +286,15 @@ class eBirdETL:
             logger.info("eBird Observations ETL - Starting")
             logger.info("=" * 60)
             
-            # Get recent observations
-            observations = self.get_recent_observations()
+            # Fetch eBird observations from API (30-day limit)
+            observations = self.get_recent_observations(days_back=30)
             
-            # Get hotspots (store separately or with their own records)
-            hotspots = self.get_hotspots()
-            
-            logger.info(f"Processing {len(observations)} observations and {len(hotspots)} hotspots...")
+            logger.info(f"Processing {len(observations)} observations...")
             
             total_inserted = 0
             for obs in observations:
-                # Get species info
-                species_info = self.get_species_info(obs.get('speciesCode'))
-                
-                obs_data = self.extract_observation_data(obs, species_info)
-                if self.insert_environmental_data(obs_data):
+                obs_data = self.extract_observation_data(obs, {})
+                if self.insert_ebird_observation(obs_data):
                     total_inserted += 1
             
             logger.info("=" * 60)

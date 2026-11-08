@@ -1,152 +1,142 @@
-import axios from 'axios';
+﻿const API_URL = "https://tdot-api-manual.eba-muthcmmp.us-east-2.elasticbeanstalk.com/api";
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
-
-/**
- * TDOT Projects API Service
- * Handles all API calls related to TDOT projects
- */
-export const projectsAPI = {
-  /**
-   * Get all projects with optional filtering and pagination
-   * @param {Object} params - Query parameters
-   * @param {number} params.limit - Results per page (1-100, default 20)
-   * @param {number} params.offset - Pagination offset (default 0)
-   * @param {string} params.status - Filter by project status
-   * @param {string} params.county - Filter by county
-   * @param {string} params.region - Filter by region
-   * @returns {Promise} API response with projects and pagination info
-   */
-  getAll: async (params = {}) => {
-    try {
-      const defaultParams = {
-        limit: 20,
-        offset: 0,
-        ...params
-      };
-      const response = await axios.get(`${API_BASE_URL}/api/projects`, {
-        params: defaultParams
-      });
-      return response.data;
-    } catch (error) {
-      console.error('Error fetching projects:', error);
-      throw error;
-    }
-  },
-
-  /**
-   * Get projects by status
-   * @param {string} status - Project status to filter by
-   * @param {number} limit - Results per page
-   * @param {number} offset - Pagination offset
-   * @returns {Promise} Filtered projects
-   */
-  getByStatus: async (status, limit = 20, offset = 0) => {
-    return projectsAPI.getAll({ status, limit, offset });
-  },
-
-  /**
-   * Get projects by county
-   * @param {string} county - County name to filter by
-   * @param {number} limit - Results per page
-   * @param {number} offset - Pagination offset
-   * @returns {Promise} Filtered projects
-   */
-  getByCounty: async (county, limit = 20, offset = 0) => {
-    return projectsAPI.getAll({ county, limit, offset });
-  },
-
-  /**
-   * Get projects by region
-   * @param {string} region - Region to filter by (East TN, Middle TN, West TN)
-   * @param {number} limit - Results per page
-   * @param {number} offset - Pagination offset
-   * @returns {Promise} Filtered projects
-   */
-  getByRegion: async (region, limit = 20, offset = 0) => {
-    return projectsAPI.getAll({ region, limit, offset });
-  }
-};
-
-/**
- * Environmental Data API Service
- * Handles all API calls related to environmental data
- */
-export const environmentalAPI = {
-  /**
-   * Get all environmental data with optional filtering and pagination
-   * @param {Object} params - Query parameters
-   * @param {number} params.limit - Results per page (1-100, default 20)
-   * @param {number} params.offset - Pagination offset (default 0)
-   * @param {string} params.category - Filter by data category
-   * @param {string} params.source - Filter by data source
-   * @returns {Promise} API response with environmental data and pagination info
-   */
-  getAll: async (params = {}) => {
-    try {
-      const defaultParams = {
-        limit: 20,
-        offset: 0,
-        ...params
-      };
-      const response = await axios.get(`${API_BASE_URL}/api/environmental-data`, {
-        params: defaultParams
-      });
-      return response.data;
-    } catch (error) {
-      console.error('Error fetching environmental data:', error);
-      throw error;
-    }
-  },
-
-  /**
-   * Get environmental data by category
-   * @param {string} category - Data category to filter by
-   * @param {number} limit - Results per page
-   * @param {number} offset - Pagination offset
-   * @returns {Promise} Filtered environmental data
-   */
-  getByCategory: async (category, limit = 20, offset = 0) => {
-    return environmentalAPI.getAll({ category, limit, offset });
-  },
-
-  /**
-   * Get environmental data by source
-   * @param {string} source - Data source to filter by (USGS, TDEC, EPA, etc.)
-   * @param {number} limit - Results per page
-   * @param {number} offset - Pagination offset
-   * @returns {Promise} Filtered environmental data
-   */
-  getBySource: async (source, limit = 20, offset = 0) => {
-    return environmentalAPI.getAll({ source, limit, offset });
-  }
-};
-
-/**
- * Health Check Service
- * Monitors backend and database connectivity
- */
 export const healthAPI = {
-  /**
-   * Check backend and database status
-   * @returns {Promise} Health status object
-   */
   check: async () => {
     try {
-      const response = await axios.get(`${API_BASE_URL}/api/health`);
-      return response.data;
-    } catch (error) {
-      console.error('Health check failed:', error);
-      return {
-        status: 'offline',
-        error: error.message
-      };
+      const res = await fetch(`${API_URL}/health`);
+      return res.ok ? await res.json() : { status: "error" };
+    } catch (err) {
+      return { status: "error", message: err.message };
     }
   }
 };
 
-export default {
-  projectsAPI,
-  environmentalAPI,
-  healthAPI
+export const projectsAPI = {
+  getAll: async (params = {}) => {
+    try {
+      const qs = new URLSearchParams(params).toString();
+      const res = await fetch(`${API_URL}/projects?${qs}`);
+      return res.ok ? await res.json() : { success: false, data: [] };
+    } catch (err) {
+      return { success: false, error: err.message, data: [] };
+    }
+  }
+};
+
+export const layersAPI = {
+  ebird: async (params) => {
+    const qs = new URLSearchParams(params).toString();
+    const res = await fetch(`${API_URL}/layers/ebird/locations?${qs}`);
+    return res.ok ? await res.json() : { type: "FeatureCollection", features: [] };
+  },
+  waterQuality: async (params) => {
+    const qs = new URLSearchParams(params).toString();
+    const res = await fetch(`${API_URL}/layers/water-quality/stations?${qs}`);
+    return res.ok ? await res.json() : { type: "FeatureCollection", features: [] };
+  },
+  climate: async (params) => {
+    const qs = new URLSearchParams(params).toString();
+    const res = await fetch(`${API_URL}/layers/climate/stations?${qs}`);
+    return res.ok ? await res.json() : { type: "FeatureCollection", features: [] };
+  },
+  inaturalist: async (params) => {
+    const qs = new URLSearchParams(params).toString();
+    const res = await fetch(`${API_URL}/layers/biodiversity/observations?${qs}`);
+    return res.ok ? await res.json() : { type: "FeatureCollection", features: [] };
+  },
+  huc12: async (params) => {
+    try {
+      const { north, south, east, west } = params;
+      if (!north || !south || !east || !west) {
+        return { type: "FeatureCollection", features: [] };
+      }
+      
+      // Helper function to convert WGS84 to Web Mercator
+      const toWebMercator = (lon, lat) => {
+        const x = lon * 20037508.34 / 180;
+        const y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) * 20037508.34 / Math.PI;
+        return [x, y];
+      };
+      
+      // Convert bbox to Web Mercator
+      const [xmin, ymin] = toWebMercator(west, south);
+      const [xmax, ymax] = toWebMercator(east, north);
+      
+      // Call TDEC HUC12 REST service (uses Web Mercator - WKID 102113)
+      const tdecUrl = 'https://tdeconline.tn.gov/arcgis/rest/services/HUC12/MapServer/0/query';
+      const geometryJson = JSON.stringify({ xmin, ymin, xmax, ymax });
+      
+      const url = new URL(tdecUrl);
+      url.searchParams.append('geometry', geometryJson);
+      url.searchParams.append('geometryType', 'esriGeometryEnvelope');
+      url.searchParams.append('spatialRel', 'esriSpatialRelIntersects');
+      url.searchParams.append('outSR', JSON.stringify({ wkid: 4326 }));
+      url.searchParams.append('f', 'geojson');
+      url.searchParams.append('returnGeometry', 'true');
+      url.searchParams.append('outFields', '*');
+      
+      const res = await fetch(url.toString(), { mode: 'cors' });
+      if (!res.ok) {
+        console.warn(`HUC12 API returned status ${res.status}`);
+        return { type: "FeatureCollection", features: [] };
+      }
+      
+      const data = await res.json();
+      return {
+        type: "FeatureCollection",
+        features: (data.features || []).map(f => ({
+          type: "Feature",
+          id: f.properties?.HUC_12,
+          geometry: f.geometry,
+          properties: {
+            huc12: f.properties?.HUC_12 || 'N/A',
+            huc10: f.properties?.HUC_10 || 'N/A',
+            huc8: f.properties?.HUC_8 || 'N/A',
+            name: f.properties?.HU_12_NAME || 'Unnamed Watershed',
+            area_acres: f.properties?.ACRES,
+            downstream_huc12: f.properties?.HU_12_DS,
+            states: f.properties?.STATES,
+            data_source: 'TDEC HUC12'
+          }
+        }))
+      };
+    } catch (err) {
+      console.error('HUC12 service error:', err);
+      return { type: "FeatureCollection", features: [] };
+    }
+  },
+  floodHazard: async (params) => {
+    try {
+      const qs = new URLSearchParams(params).toString();
+      const res = await fetch(`${API_URL}/layers/flood-hazard/zones?${qs}`);
+      return res.ok ? await res.json() : { type: "FeatureCollection", features: [] };
+    } catch (err) {
+      console.error('Flood hazard service error:', err);
+      return { type: "FeatureCollection", features: [] };
+    }
+  }
+};
+
+export const fetchLayerData = async (layerId, params = {}) => {
+  try {
+    switch (layerId) {
+      case "ebird":
+        return await layersAPI.ebird(params);
+      case "water-quality":
+        return await layersAPI.waterQuality(params);
+      case "climate":
+        return await layersAPI.climate(params);
+      case "inaturalist":
+        return await layersAPI.inaturalist(params);
+      case "huc12":
+        return await layersAPI.huc12(params);
+      case "flood-hazard":
+        return await layersAPI.floodHazard(params);
+      default:
+        return { type: "FeatureCollection", features: [] };
+    }
+  } catch (err) {
+    console.error('Error fetching layer data:', err);
+    return { type: "FeatureCollection", features: [] };
+  }
 };

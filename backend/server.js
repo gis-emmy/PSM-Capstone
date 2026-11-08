@@ -5,6 +5,7 @@ const express = require('express');
 const cors = require('cors');
 const dotenv = require('dotenv');
 const { Pool } = require('pg');
+const layersRouter = require('./routes/layers');
 
 // load .env
 dotenv.config();
@@ -19,7 +20,8 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD || 'dev-password',
   host: process.env.DB_HOST || 'localhost',
   port: process.env.DB_PORT || 5432,
-  database: process.env.DB_NAME || 'tdot_env'
+  database: process.env.DB_NAME || 'tdot_env',
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
 // Handle pool errors
@@ -48,8 +50,21 @@ async function queryDatabase(sql, params = []) {
 }
 
 // middleware
-app.use(cors());
+app.use(cors({
+  origin: [
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://tdot-frontend-59406.s3-website.us-east-2.amazonaws.com',
+    'http://tdot-frontend-59406.s3.us-east-2.amazonaws.com'
+  ],
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 app.use(express.json());
+
+// Mount layers API routes
+app.use('/api/layers', layersRouter(pool));
 
 // generic status endpoint
 app.get('/api/health', async (req, res) => {
@@ -132,7 +147,7 @@ app.get('/api/projects', async (req, res) => {
     }
 
     // Get total count
-    const countResult = await queryDatabase(`SELECT COUNT(*) FROM TDOT_Projects${whereClause}`, params);
+    const countResult = await queryDatabase(`SELECT COUNT(*) FROM tdot_projects${whereClause}`, params);
     const total = countResult.success ? countResult.data[0].count : 0;
 
     // Get paginated results
@@ -140,7 +155,7 @@ app.get('/api/projects', async (req, res) => {
       project_id, project_name, project_number, description, status, 
       project_type, start_date, completion_date, region, county,
       project_cost, data_confidence, updated_at
-      FROM TDOT_Projects${whereClause}
+      FROM tdot_projects${whereClause}
       ORDER BY updated_at DESC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     
@@ -176,7 +191,7 @@ app.get('/api/projects', async (req, res) => {
 
 app.get('/api/environmental-data', async (req, res) => {
   try {
-    const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+    const limit = Math.min(parseInt(req.query.limit) || 20, 5000);
     const offset = parseInt(req.query.offset) || 0;
     const category = req.query.category;
     const source = req.query.source;
@@ -199,15 +214,15 @@ app.get('/api/environmental-data', async (req, res) => {
     }
 
     // Get total count
-    const countResult = await queryDatabase(`SELECT COUNT(*) FROM Environmental_Data${whereClause}`, params);
+    const countResult = await queryDatabase(`SELECT COUNT(*) FROM environmental_data${whereClause}`, params);
     const total = countResult.success ? countResult.data[0].count : 0;
 
     // Get paginated results
     const sql = `SELECT 
       env_data_id, data_category, data_type, data_source, 
-      species_name, protected_status, habitat_type, measurement_value,
-      measurement_unit, measurement_date, data_confidence, updated_at
-      FROM Environmental_Data${whereClause}
+      latitude, longitude, value, unit,
+      measurement_date, data_quality_flag, is_validated, updated_at
+      FROM environmental_data${whereClause}
       ORDER BY updated_at DESC
       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     
