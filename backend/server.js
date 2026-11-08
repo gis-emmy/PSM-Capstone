@@ -68,36 +68,37 @@ app.use('/api/layers', layersRouter(pool));
 
 // generic status endpoint
 app.get('/api/health', async (req, res) => {
+  let dbStatus = 'unknown';
+  let dbError = null;
+
   try {
-    // Test database connection
-    await pool.query('SELECT NOW()');
-    const dbStatus = 'connected';
+    // Test database connection with timeout
+    const queryPromise = pool.query('SELECT NOW()');
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Database query timeout')), 5000)
+    );
     
-    res.status(200).json({
-      status: 'Backend is running!',
-      timestamp: new Date().toISOString(),
-      environment: process.env.NODE_ENV || 'development',
-      database: {
-        status: dbStatus,
-        host: process.env.DB_HOST || 'localhost',
-        port: process.env.DB_PORT || 5432,
-        name: process.env.DB_NAME || 'tdot_env'
-      }
-    });
+    await Promise.race([queryPromise, timeoutPromise]);
+    dbStatus = 'connected';
   } catch (error) {
-    res.status(503).json({
-      status: 'Backend running, database unavailable',
-      timestamp: new Date().toISOString(),
-      environment: process.env.NODE_ENV || 'development',
-      database: {
-        status: 'disconnected',
-        error: error.message,
-        host: process.env.DB_HOST || 'localhost',
-        port: process.env.DB_PORT || 5432,
-        name: process.env.DB_NAME || 'tdot_env'
-      }
-    });
+    dbStatus = 'disconnected';
+    dbError = error.message;
+    console.warn('Health check - Database connection issue:', error.message);
   }
+
+  // Always return 200 if backend is running, even if DB is unavailable
+  res.status(200).json({
+    status: 'running',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    database: {
+      status: dbStatus,
+      error: dbError,
+      host: process.env.DB_HOST || 'localhost',
+      port: process.env.DB_PORT || 5432,
+      name: process.env.DB_NAME || 'tdot_env'
+    }
+  });
 });
 
 // define root
@@ -153,7 +154,7 @@ app.get('/api/projects', async (req, res) => {
     // Get paginated results
     const sql = `SELECT 
       project_id, project_name, project_number, description, status, 
-      project_type, start_date, completion_date, region, county,
+      project_type, start_date, completion_date, latitude, longitude, region, county,
       project_cost, data_confidence, updated_at
       FROM tdot_projects${whereClause}
       ORDER BY updated_at DESC

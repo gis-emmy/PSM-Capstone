@@ -1,10 +1,17 @@
-﻿const API_URL = "https://tdot-api-manual.eba-muthcmmp.us-east-2.elasticbeanstalk.com/api";
+﻿const API_URL = "http://tdot-api-manual.eba-muthcmmp.us-east-2.elasticbeanstalk.com/api";
 
 export const healthAPI = {
   check: async () => {
     try {
-      const res = await fetch(`${API_URL}/health`);
-      return res.ok ? await res.json() : { status: "error" };
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      
+      const res = await fetch(`${API_URL}/health`, {
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      return res.ok ? await res.json() : { status: "error", message: "HTTP error: " + res.status };
     } catch (err) {
       return { status: "error", message: err.message };
     }
@@ -25,59 +32,95 @@ export const projectsAPI = {
 
 export const layersAPI = {
   ebird: async (params) => {
-    const qs = new URLSearchParams(params).toString();
-    const res = await fetch(`${API_URL}/layers/ebird/locations?${qs}`);
-    return res.ok ? await res.json() : { type: "FeatureCollection", features: [] };
+    try {
+      const qs = new URLSearchParams(params).toString();
+      const res = await fetch(`${API_URL}/layers/ebird/locations?${qs}`);
+      if (!res.ok) {
+        console.error(`eBird API error: ${res.status}`);
+        return { type: "FeatureCollection", features: [] };
+      }
+      return await res.json();
+    } catch (err) {
+      console.error('eBird service error:', err);
+      return { type: "FeatureCollection", features: [] };
+    }
   },
   waterQuality: async (params) => {
-    const qs = new URLSearchParams(params).toString();
-    const res = await fetch(`${API_URL}/layers/water-quality/stations?${qs}`);
-    return res.ok ? await res.json() : { type: "FeatureCollection", features: [] };
+    try {
+      const qs = new URLSearchParams(params).toString();
+      const res = await fetch(`${API_URL}/layers/water-quality/stations?${qs}`);
+      if (!res.ok) {
+        console.error(`Water Quality API error: ${res.status}`);
+        return { type: "FeatureCollection", features: [] };
+      }
+      return await res.json();
+    } catch (err) {
+      console.error('Water Quality service error:', err);
+      return { type: "FeatureCollection", features: [] };
+    }
   },
   climate: async (params) => {
-    const qs = new URLSearchParams(params).toString();
-    const res = await fetch(`${API_URL}/layers/climate/stations?${qs}`);
-    return res.ok ? await res.json() : { type: "FeatureCollection", features: [] };
+    try {
+      const qs = new URLSearchParams(params).toString();
+      const res = await fetch(`${API_URL}/layers/climate/stations?${qs}`);
+      if (!res.ok) {
+        console.error(`Climate API error: ${res.status}`);
+        return { type: "FeatureCollection", features: [] };
+      }
+      return await res.json();
+    } catch (err) {
+      console.error('Climate service error:', err);
+      return { type: "FeatureCollection", features: [] };
+    }
   },
   inaturalist: async (params) => {
-    const qs = new URLSearchParams(params).toString();
-    const res = await fetch(`${API_URL}/layers/biodiversity/observations?${qs}`);
-    return res.ok ? await res.json() : { type: "FeatureCollection", features: [] };
+    try {
+      const qs = new URLSearchParams(params).toString();
+      const res = await fetch(`${API_URL}/layers/inaturalist?${qs}`);
+      if (!res.ok) {
+        console.error(`iNaturalist API error: ${res.status}`);
+        return { type: "FeatureCollection", features: [] };
+      }
+      const data = await res.json();
+      if (!data || !Array.isArray(data.features)) {
+        console.warn('iNaturalist returned invalid data:', data);
+        return { type: "FeatureCollection", features: [] };
+      }
+      return data;
+    } catch (err) {
+      console.error('iNaturalist service error:', err);
+      return { type: "FeatureCollection", features: [] };
+    }
   },
   huc12: async (params) => {
     try {
+      // Query TDEC HUC12 REST service directly from frontend
       const { north, south, east, west } = params;
       if (!north || !south || !east || !west) {
         return { type: "FeatureCollection", features: [] };
       }
       
-      // Helper function to convert WGS84 to Web Mercator
-      const toWebMercator = (lon, lat) => {
-        const x = lon * 20037508.34 / 180;
-        const y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) * 20037508.34 / Math.PI;
-        return [x, y];
-      };
-      
-      // Convert bbox to Web Mercator
-      const [xmin, ymin] = toWebMercator(west, south);
-      const [xmax, ymax] = toWebMercator(east, north);
-      
-      // Call TDEC HUC12 REST service (uses Web Mercator - WKID 102113)
       const tdecUrl = 'https://tdeconline.tn.gov/arcgis/rest/services/HUC12/MapServer/0/query';
-      const geometryJson = JSON.stringify({ xmin, ymin, xmax, ymax });
+      const geometry = JSON.stringify({
+        xmin: west,
+        ymin: south,
+        xmax: east,
+        ymax: north
+      });
       
       const url = new URL(tdecUrl);
-      url.searchParams.append('geometry', geometryJson);
+      url.searchParams.append('geometry', geometry);
       url.searchParams.append('geometryType', 'esriGeometryEnvelope');
+      url.searchParams.append('inSR', JSON.stringify({ wkid: 4326 }));
       url.searchParams.append('spatialRel', 'esriSpatialRelIntersects');
       url.searchParams.append('outSR', JSON.stringify({ wkid: 4326 }));
       url.searchParams.append('f', 'geojson');
       url.searchParams.append('returnGeometry', 'true');
       url.searchParams.append('outFields', '*');
       
-      const res = await fetch(url.toString(), { mode: 'cors' });
+      const res = await fetch(url.toString());
       if (!res.ok) {
-        console.warn(`HUC12 API returned status ${res.status}`);
+        console.error(`HUC12 API error: ${res.status}`);
         return { type: "FeatureCollection", features: [] };
       }
       
@@ -130,7 +173,7 @@ export const fetchLayerData = async (layerId, params = {}) => {
         return await layersAPI.inaturalist(params);
       case "huc12":
         return await layersAPI.huc12(params);
-      case "flood-hazard":
+      case "flood-zones":
         return await layersAPI.floodHazard(params);
       default:
         return { type: "FeatureCollection", features: [] };
