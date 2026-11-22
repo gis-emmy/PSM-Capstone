@@ -163,3 +163,4 @@ progress_logs/*
 *.elasticbeanstalk/
 *deployment/
 *deprecated_environments/*
+*deprecated/

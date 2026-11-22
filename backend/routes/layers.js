@@ -115,12 +115,36 @@ module.exports = function(pool) {
       const result = await queryDatabase(sql, params);
 
       if (result.success) {
+        // Get observations for all locations
+        const locationIds = result.data.map(loc => loc.location_id);
+        const observationsByLocation = {};
+        
+        if (locationIds.length > 0) {
+          const placeholders = locationIds.map((_, i) => `$${i + 1}`).join(',');
+          const obsResult = await queryDatabase(
+            `SELECT observation_id, location_id, ebird_id, species_code,
+                    common_name, scientific_name, observation_date,
+                    observation_count, is_protected, is_validated, data_quality_flag
+             FROM ebird_observations_new
+             WHERE location_id IN (${placeholders})`,
+            locationIds
+          );
+          
+          if (obsResult.success) {
+            obsResult.data.forEach(obs => {
+              if (!observationsByLocation[obs.location_id]) {
+                observationsByLocation[obs.location_id] = [];
+              }
+              observationsByLocation[obs.location_id].push(obs);
+            });
+          }
+        }
+
         const features = result.data.map(loc => 
           createFeature(
             loc.location_id,
             createPointGeometry(loc.latitude, loc.longitude),
             {
-              location_id: loc.location_id,
               location_name: loc.location_name,
               latitude: loc.latitude,
               longitude: loc.longitude,
@@ -128,6 +152,7 @@ module.exports = function(pool) {
               unique_species_count: loc.unique_species_count,
               first_observation_date: loc.first_observation_date,
               last_observation_date: loc.last_observation_date,
+              observations: observationsByLocation[loc.location_id] || [],
               url: `https://ebird.org/hotspot/${loc.location_id}`,
               data_source: 'eBird'
             }
@@ -275,24 +300,147 @@ module.exports = function(pool) {
   // Get water quality results for a specific station
   router.get('/water-quality/station/:station_id/results', async (req, res) => {
     try {
-      const station_id = req.params.station_id;
-      const days_back = parseInt(req.query.days_back) || 90;
+      const monitoring_location_identifier = req.params.station_id;
       const limit = Math.min(parseInt(req.query.limit) || 10, 100);
 
-      // Note: This would typically query an external WQP API
-      // For now, return placeholder structure
+      // EPA WQP API works with CSV format, not JSON
+      console.log(`[WQP API] Fetching results for ${monitoring_location_identifier}`);
+      
+      const response = await axios.get('https://waterqualitydata.us/data/Result/search', {
+        params: {
+          siteid: monitoring_location_identifier,
+          mimeType: 'csv',
+          zip: 'no'
+        },
+        headers: {
+          'User-Agent': 'TDOT-Environmental-Viewer/1.0'
+        },
+        timeout: 15000
+      });
+
+      // Helper function to parse CSV line respecting quoted fields
+      function parseCSVLine(line) {
+        const result = [];
+        let current = '';
+        let inQuotes = false;
+        
+        for (let i = 0; i < line.length; i++) {
+          const char = line[i];
+          const nextChar = line[i + 1];
+          
+          if (char === '"') {
+            if (inQuotes && nextChar === '"') {
+              // Escaped quote
+              current += '"';
+              i++; // Skip next quote
+            } else {
+              // Toggle quote state
+              inQuotes = !inQuotes;
+            }
+          } else if (char === ',' && !inQuotes) {
+            // Field separator
+            result.push(current.trim().replace(/^"|"$/g, ''));
+            current = '';
+          } else {
+            current += char;
+          }
+        }
+        
+        // Add last field
+        result.push(current.trim().replace(/^"|"$/g, ''));
+        return result;
+      }
+
+      // Parse CSV response
+      const lines = response.data.split('\n');
+      if (lines.length < 2) {
+        // No data returned
+        return res.json({
+          station_id: monitoring_location_identifier,
+          results_count: 0,
+          results: [],
+          source: 'EPA Water Quality Portal (WQP) - Result/search'
+        });
+      }
+
+      // Parse CSV header and data
+      const headerLine = lines[0];
+      const headers = parseCSVLine(headerLine);
+      const results = [];
+
+      for (let i = 1; i < lines.length; i++) {
+        const line = lines[i].trim();
+        if (!line) continue;
+
+        // Parse CSV line properly, handling quoted fields
+        const values = parseCSVLine(line);
+        const row = {};
+        headers.forEach((header, idx) => {
+          row[header] = values[idx] || '';
+        });
+
+        // Only include results with actual measured values (filter out empty results)
+        if (row['ResultMeasureValue']) {
+          results.push({
+            activity_id: row['ActivityIdentifier'],
+            date: row['ActivityStartDate'],
+            parameter: row['CharacteristicName'],
+            result_value: row['ResultMeasureValue'],
+            units: row['ResultMeasure.MeasureUnitCode'] || row['ResultMeasureUnit'] || '',
+            status: row['ResultStatusIdentifier'] || 'Final',
+            media: row['ActivityMediaName']
+          });
+        }
+      }
+
+      // Sort by date (most recent first)
+      results.sort((a, b) => {
+        const dateA = new Date(a.date || 0);
+        const dateB = new Date(b.date || 0);
+        return dateB - dateA;
+      });
+
+      // Limit to requested count
+      const limitedResults = results.slice(0, limit);
+
+      console.log(`[WQP API] Returned ${limitedResults.length} results (out of ${results.length} total) for ${monitoring_location_identifier}`);
+
       res.json({
-        station_id,
-        results: [],
-        note: 'Water quality results queried from EPA WQP API on-demand',
-        api_endpoint: `https://waterqualitydata.us/data/Result/search?siteid=${station_id}&mimeType=json`
+        station_id: monitoring_location_identifier,
+        results_count: limitedResults.length,
+        total_available: results.length,
+        results: limitedResults,
+        source: 'EPA Water Quality Portal (WQP) - Result/search (CSV, sorted by date DESC)'
       });
     } catch (error) {
-      res.status(500).json({
-        success: false,
-        error: 'Internal server error',
-        message: error.message
-      });
+      console.error('EPA WQP results API error:', error.message);
+      
+      if (error.response?.status === 404) {
+        // Station not found
+        res.json({
+          station_id: req.params.station_id,
+          results_count: 0,
+          results: [],
+          note: 'No results found for this monitoring location in EPA WQP database'
+        });
+      } else if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
+        res.status(503).json({
+          success: false,
+          error: 'EPA API request timeout',
+          message: 'The EPA WQP API did not respond in time.',
+          results_count: 0,
+          results: []
+        });
+      } else {
+        res.status(503).json({
+          success: false,
+          error: 'Failed to query EPA WQP API',
+          message: error.message,
+          results_count: 0,
+          results: [],
+          station_id: req.params.station_id
+        });
+      }
     }
   });
 
@@ -723,21 +871,30 @@ module.exports = function(pool) {
       const response = await axios.get(tdecUrl, { params, timeout: 10000 });
       
       if (response.data.features) {
-        const features = response.data.features.map(feature => ({
-          type: 'Feature',
-          id: feature.properties?.HUC_12,
-          geometry: feature.geometry,
-          properties: {
-            huc12: feature.properties?.HUC_12 || 'N/A',
-            huc10: feature.properties?.HUC_10 || 'N/A',
-            huc8: feature.properties?.HUC_8 || 'N/A',
-            name: feature.properties?.HU_12_NAME || 'Unnamed Watershed',
-            area_acres: feature.properties?.ACRES,
-            downstream_huc12: feature.properties?.HU_12_DS,
-            states: feature.properties?.STATES,
-            data_source: 'TDEC HUC12'
-          }
-        }));
+        const features = response.data.features.map(feature => {
+          // Calculate drainage area in square miles from acres
+          const acres = feature.properties?.ACRES;
+          const squareMiles = acres ? (acres / 640).toFixed(2) : null;
+          
+          return {
+            type: 'Feature',
+            id: feature.properties?.HUC_12,
+            geometry: feature.geometry,
+            properties: {
+              code: feature.properties?.HUC_12 || 'N/A',
+              huc12: feature.properties?.HUC_12 || 'N/A',
+              huc10: feature.properties?.HUC_10 || 'N/A',
+              huc8: feature.properties?.HUC_8 || 'N/A',
+              name: feature.properties?.HU_12_NAME || 'Unnamed Watershed',
+              drainage_area: squareMiles ? squareMiles + ' sq mi' : null,
+              region: feature.properties?.STATES || feature.properties?.REGION || null,
+              area_acres: acres,
+              downstream_huc12: feature.properties?.HU_12_DS,
+              states: feature.properties?.STATES,
+              data_source: 'TDEC HUC12'
+            }
+          };
+        });
 
         res.json(createFeatureCollection(features, {
           source: '/api/layers/huc12',

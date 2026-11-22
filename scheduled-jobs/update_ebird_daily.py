@@ -78,13 +78,9 @@ class eBirdDailyUpdate:
         try:
             cursor = self.conn.cursor()
             
-            # Truncate observations first (foreign key constraint)
-            cursor.execute("TRUNCATE TABLE ebird_observations_new")
-            logger.info("✓ Truncated ebird_observations_new")
-            
-            # Truncate locations
-            cursor.execute("TRUNCATE TABLE ebird_locations")
-            logger.info("✓ Truncated ebird_locations")
+            # Truncate both tables with CASCADE to handle foreign key constraint
+            cursor.execute("TRUNCATE TABLE ebird_locations CASCADE")
+            logger.info("✓ Truncated ebird_locations and ebird_observations_new")
             
             self.conn.commit()
             cursor.close()

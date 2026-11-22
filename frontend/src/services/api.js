@@ -1,5 +1,7 @@
 ﻿const API_URL = "http://tdot-api-manual.eba-muthcmmp.us-east-2.elasticbeanstalk.com/api";
 
+export { API_URL };
+
 export const healthAPI = {
   check: async () => {
     try {
@@ -21,11 +23,55 @@ export const healthAPI = {
 export const projectsAPI = {
   getAll: async (params = {}) => {
     try {
-      const qs = new URLSearchParams(params).toString();
+      // Add cache-busting parameter
+      const cacheParam = { ...params, t: Date.now() };
+      const qs = new URLSearchParams(cacheParam).toString();
+      console.log('[projectsAPI] Fetching with params:', cacheParam);
       const res = await fetch(`${API_URL}/projects?${qs}`);
-      return res.ok ? await res.json() : { success: false, data: [] };
+      if (!res.ok) {
+        console.error('[projectsAPI] Response not OK:', res.status, res.statusText);
+        return { success: false, data: [], error: res.statusText };
+      }
+      const data = await res.json();
+      console.log('[projectsAPI] Successfully fetched projects:', {
+        success: data.success,
+        featureCount: data.features?.length,
+        pagination: data.pagination
+      });
+      return data;
     } catch (err) {
+      console.error('[projectsAPI] Error:', err);
       return { success: false, error: err.message, data: [] };
+    }
+  },
+
+  // Get projects within a bounding box
+  getByBbox: async (bbox, params = {}) => {
+    try {
+      // bbox format: [minLng, minLat, maxLng, maxLat]
+      const bboxStr = `${bbox[0]},${bbox[1]},${bbox[2]},${bbox[3]}`;
+      console.log('[projectsAPI] Fetching by bbox:', bboxStr);
+      
+      const cacheParam = { 
+        ...params, 
+        bbox: bboxStr, 
+        t: Date.now() 
+      };
+      const qs = new URLSearchParams(cacheParam).toString();
+      const res = await fetch(`${API_URL}/projects?${qs}`);
+      if (!res.ok) {
+        console.error('[projectsAPI] Response not OK:', res.status, res.statusText);
+        return { success: false, features: [], error: res.statusText };
+      }
+      const data = await res.json();
+      console.log('[projectsAPI] Successfully fetched bbox-filtered projects:', {
+        success: data.success,
+        featureCount: data.features?.length
+      });
+      return data;
+    } catch (err) {
+      console.error('[projectsAPI] Error fetching by bbox:', err);
+      return { success: false, error: err.message, features: [] };
     }
   }
 };

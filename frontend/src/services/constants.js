@@ -38,7 +38,7 @@
     name: 'Flood Zones', 
     color: '#FF4500', 
     type: 'polygon',
-    displayExtent: 0.5,
+    displayExtent: Infinity,
     requiresBbox: true
   }
 };

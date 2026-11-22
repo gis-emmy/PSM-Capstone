@@ -1,10 +1,12 @@
-﻿import { useState, useEffect } from 'react';
+﻿import { useState, useEffect, useRef } from 'react';
 import { healthAPI, projectsAPI, fetchLayerData } from './services/api';
 import { LAYER_CONFIG, BASE_MAPS } from './services/constants';
 import Map from './components/Map';
+import ExportTool from './components/ExportTool';
 import './App.css';
 
 export default function App() {
+  const exportToolRef = useRef(null);
   const [backendStatus, setBackendStatus] = useState('checking');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -23,7 +25,13 @@ export default function App() {
   const [layersLoading, setLayersLoading] = useState({});
   const [baseMapKey, setBaseMapKey] = useState('OpenStreetMap');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [mapBounds, setMapBounds] = useState({ north: 36.5, south: 35.0, east: -81.5, west: -90.0 });
+  // Chattanooga-centered default extent (approximately 20 miles radius)
+  const [mapBounds, setMapBounds] = useState({ north: 35.15, south: 34.95, east: -85.15, west: -85.38 });
+  const [initialLoadDone, setInitialLoadDone] = useState(false);
+  // Track the currently open popup to restore it after data refresh
+  const [openPopupId, setOpenPopupId] = useState(null);
+  // Track selected project for export
+  const [selectedProject, setSelectedProject] = useState(null);
 
   useEffect(() => {
     const init = async () => {
@@ -32,11 +40,6 @@ export default function App() {
         const health = await healthAPI.check();
         if (health.status === 'running') {
           setBackendStatus('running');
-          const res = await projectsAPI.getAll({ limit: 1000 });
-          if (res.success) {
-            setProjects(res.data || []);
-            setProjectCount(res.data?.length || 0);
-          }
         } else {
           setBackendStatus('offline');
           setError('Backend server is offline');
@@ -47,10 +50,46 @@ export default function App() {
         setError('Error: ' + err.message);
       } finally {
         setLoading(false);
+        setInitialLoadDone(true);
       }
     };
     init();
   }, []);
+
+  // Refetch projects when map bounds change (after initial load)
+  useEffect(() => {
+    if (!initialLoadDone || backendStatus !== 'running') {
+      console.log('[App] Skipping projects fetch: initialLoadDone=', initialLoadDone, 'backendStatus=', backendStatus);
+      return;
+    }
+    
+    const refreshProjects = async () => {
+      console.log('[App] Map bounds changed, refetching projects:', mapBounds);
+      try {
+        const res = await projectsAPI.getByBbox(
+          [mapBounds.west, mapBounds.south, mapBounds.east, mapBounds.north],
+          { limit: 1000 }
+        );
+        
+        console.log('[App] API response:', res);
+        if (res.success) {
+          const projectData = res.features || res.data || [];
+          console.log('[App] Updated projects:', projectData.length, 'features');
+          setProjects(projectData);
+          setProjectCount(projectData?.length || 0);
+        } else {
+          console.warn('[App] API response not successful:', res);
+        }
+      } catch (err) {
+        console.error('[App] Error refreshing projects:', err);
+      }
+    };
+
+    // Debounce the refresh - only refresh after map has stopped moving
+    // This prevents constant API calls while user is panning
+    const timer = setTimeout(refreshProjects, 500);
+    return () => clearTimeout(timer);
+  }, [mapBounds, initialLoadDone, backendStatus]);
 
   useEffect(() => {
     // Load layer data when toggled on
@@ -124,26 +163,28 @@ export default function App() {
   };
 
   const toggleLayer = (layerId) => {
-    setVisibleLayers(prev => ({ ...prev, [layerId]: !prev[layerId] }));
+    setVisibleLayers(prev => {
+      const newVisibleLayers = { ...prev, [layerId]: !prev[layerId] };
+      // Clear the count when layer is turned off
+      if (!newVisibleLayers[layerId]) {
+        setLayerCounts(prevCounts => ({ ...prevCounts, [layerId]: undefined }));
+      }
+      return newVisibleLayers;
+    });
   };
 
   return (
     <div className='app'>
       <header className='header'>
-        <h1>TDOT Environmental Data</h1>
-        <div className='status'>
-          {backendStatus === 'running' ? '✓ Connected to RDS' : '✗ Backend Offline'}
-        </div>
+        <h1>TDOT Projects and Environmental Data Viewer</h1>
       </header>
 
       <div className='container'>
         <aside className='sidebar'>
-          <button className='toggle-btn' onClick={() => setSidebarCollapsed(!sidebarCollapsed)}>
-            {sidebarCollapsed ? '▶' : '◀'}
-          </button>
-
           {error && <div className='error'>{error}</div>}
           {loading && <div className='loading'>Loading...</div>}
+
+          <ExportTool ref={exportToolRef} mapBounds={mapBounds} projects={projects} />
 
           <section>
             <h3>Base Maps</h3>
@@ -158,7 +199,7 @@ export default function App() {
 
           <section>
             <h3>Projects</h3>
-            <p>{projectCount} projects - Always visible</p>
+            <p>{projectCount} projects</p>
           </section>
 
           <section>
@@ -172,15 +213,59 @@ export default function App() {
               </label>
             ))}
           </section>
+
+          <section>
+            <h3>Legend</h3>
+            <div className='legend'>
+              <div className='legend-item'>
+                <div className='legend-symbol legend-line'></div>
+                <span>TDOT Projects</span>
+              </div>
+              <div className='legend-item'>
+                <img src='/icons/ebird.jpg' alt='eBird' className='legend-icon' />
+                <span>eBird Locations</span>
+              </div>
+              <div className='legend-item'>
+                <img src='/icons/water-quality.jpg' alt='Water Quality' className='legend-icon' />
+                <span>Water Quality</span>
+              </div>
+              <div className='legend-item'>
+                <img src='/icons/climate.jpg' alt='Climate' className='legend-icon' />
+                <span>Climate Stations</span>
+              </div>
+              <div className='legend-item'>
+                <img src='/icons/inaturalist.jpg' alt='iNaturalist' className='legend-icon' />
+                <span>iNaturalist</span>
+              </div>
+              <div className='legend-item'>
+                <div className='legend-symbol' style={{ background: 'none', border: '2px solid #9467bd', width: '12px', height: '12px' }}></div>
+                <span>HUC-12 Watersheds</span>
+              </div>
+              <div className='legend-item'>
+                <div className='legend-symbol' style={{ background: 'rgba(200, 100, 100, 0.3)', width: '12px', height: '12px' }}></div>
+                <span>Flood Hazard Zones</span>
+              </div>
+            </div>
+          </section>
         </aside>
 
         <main className='map-main'>
-          <Map projects={projects} visibleLayers={visibleLayers} layersData={layersData} baseMapKey={baseMapKey} onBoundsChange={setMapBounds} />
+          <Map 
+            projects={projects} 
+            visibleLayers={visibleLayers} 
+            layersData={layersData} 
+            baseMapKey={baseMapKey} 
+            onBoundsChange={setMapBounds}
+            openPopupId={openPopupId}
+            onPopupChange={setOpenPopupId}
+            onExportProject={(projectObj) => exportToolRef.current?.openWithProject(projectObj)}
+          />
         </main>
       </div>
 
       <footer>
-        <p>TDOT Environmental Data • RDS Database • Backend: {backendStatus === 'running' ? 'Online' : 'Offline'}</p>
+        <p>TDOT Environmental Data • Backend: {backendStatus === 'running' ? 'Online' : 'Offline'}</p>
+        <p>Developed by Emmy Averill To Fulfill Requirements of PSM Capstone</p>
       </footer>
     </div>
   );
