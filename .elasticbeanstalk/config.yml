@@ -1,0 +1,17 @@
+branch-defaults:
+  data-quality-review:
+    environment: tdot-api-manual
+environments:
+  tdot-api-manual:
+    branch: null
+    repository: null
+global:
+  application_name: tdot-api
+  default_platform: Node.js 20 running on 64bit Amazon Linux 2
+  default_region: us-east-2
+  include_git_submodules: false
+  instance_profile: null
+  platform_name: null
+  platform_version: null
+  sc: git
+  workspace_type: Application
