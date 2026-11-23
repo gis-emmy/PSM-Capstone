@@ -578,9 +578,8 @@ export default function Map({ projects = [], visibleLayers = {}, layersData = {}
             console.log(`[Map] Popup content element:`, popup?._contentNode);
             
             onPopupChange?.(featureId);
-            // Add export button after popup opens
             setTimeout(() => {
-              const popupPane = document.querySelector('.leaflet-popup-content');
+              const popupPane = this.getPopup()._contentNode;
               console.log(`[Map] Looking for popup pane, found:`, !!popupPane);
               
               if (popupPane) {
@@ -604,7 +603,6 @@ export default function Map({ projects = [], visibleLayers = {}, layersData = {}
                 btn.style.cssText = 'background: #0078D4; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 12px; font-weight: 600;';
                 btn.onclick = (e) => {
                   e.stopPropagation();
-                  // Pass the full project object to ExportTool
                   onExportProject?.(p);
                 };
                 
@@ -643,9 +641,8 @@ export default function Map({ projects = [], visibleLayers = {}, layersData = {}
           // Add event listener to track popup opening
           polygon.on('popupopen', function() {
             onPopupChange?.(featureId);
-            // Add export button after popup opens
             setTimeout(() => {
-              const popupPane = document.querySelector('.leaflet-popup-content');
+              const popupPane = this.getPopup()._contentNode;
               if (popupPane && !popupPane.querySelector('.export-btn-container')) {
                 const projectId = props.project_id || props.PROJECT_ID;
                 const btnContainer = document.createElement('div');
